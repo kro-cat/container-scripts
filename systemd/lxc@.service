@@ -5,8 +5,8 @@ After=lxc.service
 Wants=lxc.service
 Documentation=man:lxc-start man:lxc
 
-# 10s restart delay * 5 restarts * 2 (for overhead)
-StartLimitIntervalSec=1000
+# 10s restart delay * 5 restarts
+StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]

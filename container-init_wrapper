@@ -1,0 +1,5 @@
+#!/bin/sh -e 
+
+WDIR="$(dirname "$(readlink -f -- "$0")")"
+
+exec ${WDIR}/scripts/container-init --prefix="${WDIR}/profiles" $*
