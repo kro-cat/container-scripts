@@ -1,0 +1,129 @@
+#!/bin/sh
+set -eu
+
+TMPDIR=`mktemp -d ".ch_cp.XXXXXXXXXXXX"`
+cleanup() {
+	rm -rf "${TMPDIR}"
+}
+trap cleanup EXIT INT
+
+usage() {
+	cat <<EOF
+Usage: ch_cp [OPTION]... ROOT SOURCE...
+Copy SOURCE(s) into ROOT. ldd is used to determine libraries
+for executable files, which are also copied over.
+
+Options:
+  -h, --help                   print this message
+  -q, --quiet                  suppress output
+  -v, --verbose                increase output verbosity
+      --relative-to=DIR        take sources as relative to DIR
+  -f, --trackfile=FILE         track sources using FILE. existing sources in
+                                 FILE will not be copied into ROOT
+      --no-r                   don't recurse directories
+EOF
+	return 0
+}
+
+# Check for required binaries
+while IFS= read -r bin; do
+	if ! command -V "${bin}" >/dev/null 2>&1; then
+		echo "ERROR: Missing required tool in PATH: ${bin}" >&2
+		exit 1
+	fi
+done <<EOF
+xargs
+ch_depth
+EOF
+
+options="$(getopt -o h,q,v,f: -l help,quiet,verbose,relative-to:,trackfile:,no-r -- $@)"
+eval set -- "$options"
+
+ROOT=false
+if [ `id -u` -eq 0 ]
+then
+	ROOT=true
+fi
+
+RECURSIVE=true
+QUIET=false
+VERBOSE=false
+REL="/"
+TRACKFILE="${TMPDIR}/track"
+
+while :; do
+	case "$1" in
+		-h|--help)
+			usage && exit 0
+			;;
+		--relative-to)
+			REL="$(realpath -s "$2")"
+			shift 2
+			;;
+		-f|--trackfile)
+			TRACKFILE="$(realpath -s "$2")"
+			shift 2
+			;;
+		--no-r)
+			RECURSIVE=false
+			shift 1
+			;;
+		-q|--quiet)
+			QUIET=true
+			shift 1
+			;;
+		-v|--verbose)
+			VERBOSE=true
+			shift 1
+			;;
+		*)
+			break
+			;;
+	esac
+done
+
+shift 1
+[ "$#" -lt 2 ] && usage && exit 2
+
+DEPTH_ARGS=""
+$RECURSIVE || DEPTH_ARGS="${DEPTH_ARGS} -d"
+
+ROOT=`realpath -s "$1"`
+mkdir -p "${ROOT}"
+
+shift 1
+
+# D:<path>:<mode>
+# F:<path>:<mode>
+# L:<path>:<target>
+replay() {
+	while IFS=':' read -r TYPE SRC OPT
+	do
+		RSRC="$(realpath -s --relative-base="${REL}" "${SRC}")"
+		if ( test -e "${ROOT}/${RSRC}" && test "${ROOT}/${RSRC}" -nt "${SRC}" )
+		then
+			continue
+		fi
+		case "${TYPE}" in
+			D)
+				/usr/bin/echo -e "[\e[1;94mDIRECTORY\e[0m] ${ROOT}/${RSRC} (${OPT})"
+				mkdir -p "${ROOT}/${RSRC}"
+				chmod "${OPT}" "${ROOT}/${RSRC}"
+				;;
+			F)
+				/usr/bin/echo -e "[\e[1;92mFILE\e[0m] ${ROOT}/${RSRC} (${OPT})"
+				cp -dp "${SRC}" "${ROOT}/${RSRC}"
+				chmod "${OPT}" "${ROOT}/${RSRC}"
+				;;
+			L)
+				/usr/bin/echo -e "[\e[1;96mLINK\e[0m] ${ROOT}/${RSRC} => ${OPT}"
+				ln -sf "${OPT}" "${ROOT}/${RSRC}"
+				;;
+			*)
+				>&2 /usr/bin/echo -e "\e[1;91mUnsupported type: \"${TYPE}\"\e[0m"
+				;;
+		esac
+	done
+}
+
+ch_depth ${DEPTH_ARGS} --relative-base="${REL}" --trackfile="${TRACKFILE}" -- $* | replay

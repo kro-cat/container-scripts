@@ -1,0 +1,7 @@
+#!/bin/sh -e 
+
+WDIR="$(dirname "$(readlink -f -- "$0")")"
+
+export PATH="${PATH}:${WDIR}/scripts:${WDIR}/scripts/chroot_utils"
+
+exec ${WDIR}/scripts/mkprofile --prefix="$WDIR" "configs/profiles.ini" $*

@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+export PATH=$PATH:/usr/sbin:/usr/bin:/sbin:/bin
+
+TMPDIR=`mktemp -d ".iniget.XXXXXXXXXXXX"`
+cleanup() {
+	rm -rf "${TMPDIR}"
+}
+trap cleanup EXIT INT
+
+usage() {
+	cat <<EOF
+Usage: iniget [OPTIONS]... FILE SECTION [PROPERTY]...
+Print PROPERTIES from SECTION, or all parameters in INI format, from FILE
+
+Options:
+  -h, --help                   print this message
+EOF
+	return 0
+}
+
+eval set -- "$(getopt -o h -l help -- $@)"
+
+while :; do
+	case "$1" in
+		-h|--help)
+			usage && exit 0
+			;;
+		*)
+			break
+			;;
+	esac
+done
+
+shift 1
+[ "$#" -lt 2 ] && usage && exit 2
+
+INI="$(realpath $1)"
+shift 1
+
+grep -Fq "[$1]" "${INI}" || { >&2 echo "no section named \"$1\"" && exit 1; }
+
+SECTION="$(sed -nr -e "/^\[$1\]/,/^\[/{/^\[/!p}" "${INI}")"
+shift 1
+
+[ "$#" -lt 1 ] && echo "${SECTION}" && exit 0
+
+for PROP in "$@"
+do
+	echo "${SECTION}" | sed -nr -e "/^${PROP}[ ]/{s/^[^=]*=[ ]*//;p}" | sed 's/\s\+$/\n/'
+done

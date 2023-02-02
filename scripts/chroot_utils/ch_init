@@ -1,0 +1,147 @@
+#!/bin/sh
+set -eu
+
+TEMPD=`mktemp -d ".ch_init.XXXXXXXXXXXX"`
+cleanup() {
+	rm -rf "${TEMPD}"
+}
+trap cleanup EXIT INT
+
+usage() {
+	cat <<EOF
+Usage: ch_init [OPTION]... FILE ROOT SECTION
+Copy sources from SECTION defined in FILE to ROOT
+
+Options:
+  -h, --help                   print this message
+EOF
+	return 0
+}
+
+# Check for required binaries
+while IFS= read -r bin; do
+	if ! command -V "${bin}" >/dev/null 2>&1; then
+		echo "ERROR: Missing required tool: ${bin}" 1>&2
+		exit 1
+	fi
+done <<EOF
+xargs
+ch_cp
+iniget
+EOF
+
+options="$(getopt -o h -l help -- $@)"
+eval set -- "${options}"
+
+while :; do
+	case "$1" in
+		-h|--help)
+			usage && exit 0
+			;;
+		*)
+			break
+			;;
+	esac
+done
+
+shift 1
+[ "$#" -ne 3 ] && usage && exit 2
+
+INI="$(realpath $1)"
+shift 1
+
+ROOT="$1"
+SECTION="$2"
+
+TRACKFILE="${TEMPD}/track"
+touch "${TRACKFILE}"
+
+DEPENDENCIES="${TEMPD}/dependencies"
+touch "${DEPENDENCIES}"
+
+mkdir -p "${ROOT}/etc"
+
+touch "${ROOT}/etc/passwd"
+grep -q '^root:' "${ROOT}/etc/passwd" || echo "root:x:0:0:root:/root:/bin/sh" >> "${ROOT}/etc/passwd"
+
+touch "${ROOT}/etc/group"
+grep -q '^root:' "${ROOT}/etc/group" || echo "root:x:0:" >> "${ROOT}/etc/group"
+
+make_groups() {
+	while IFS= read -r group
+	do
+		query="^${group}:"
+		if ! grep -q "${query}" /etc/group
+		then
+			>&2 echo "no such group ${group}"
+		elif ! grep -q "${query}" "${ROOT}/etc/group"
+		then
+			echo "(group) ${group}"
+			grep "${query}" /etc/group >> "${ROOT}/etc/group"
+		fi
+	done
+}
+
+make_users() {
+	while IFS= read -r user
+	do
+		query="^${user}:"
+		if ! grep -q "${query}" /etc/passwd
+		then
+			>&2 echo "no such user ${group}"
+		elif ! grep -q "${query}" "${ROOT}/etc/passwd"
+		then
+			echo "(user) ${user}"
+			grep "${query}" /etc/passwd >> "${ROOT}/etc/passwd"
+			id -ng "${user}" | make_groups
+		fi
+	done
+}
+
+# [section]
+# comment      Section comment
+# include      Include other section
+# users        Copy users from /etc/passwd (and their groups from /etc/group)
+# groups       Copy groups from /etc/group (does not copy users)
+# paths        Copy paths (strips setuid/setgid), directories are recursive
+# paths_setid  Copy paths with setuid/setgid bit
+# dirs         Copy directories only
+getparam() {
+	iniget "${INI}" "$1" "$2" | tr ',' '\n' | sed 's/^[[:space:]]\+//;s/[[:space:]]\+$//' | sed '/^$/d'
+}
+
+# build list of all sections to include
+get_deps() {
+	# Check for the section
+	if ! grep -qe "^\[$1\]" "${INI}"
+	then
+		>&2 echo "section \`$1' is unknown"
+		exit 1
+	fi
+
+	echo "$1" | tee -a "${DEPENDENCIES}"
+	getparam "$1" include | while IFS= read -r dep
+	do
+		if ! grep -q "^${dep}$" "${DEPENDENCIES}"
+		then
+			get_deps "${dep}"
+		fi
+	done
+}
+
+get_deps "${SECTION}" | while IFS= read -r section
+do
+	echo "Section ${section} \"$(iniget "${INI}" "${section}" comment)\""
+
+	getparam "${section}" users | make_users
+
+	getparam "${section}" groups | make_groups
+
+	getparam "${section}" dirs | while IFS= read -r directory
+	do
+		mkdir -p "${ROOT}${directory}"
+	done
+
+	SOURCES="$(getparam "${section}" paths | tr '\n' ' ')"
+	[ -z "$SOURCES" ] || ch_cp -f "${TRACKFILE}" "${ROOT}" ${SOURCES}
+done

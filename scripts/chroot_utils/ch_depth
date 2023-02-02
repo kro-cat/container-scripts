@@ -1,0 +1,179 @@
+#!/bin/sh
+set -eu
+
+TEMPD="$(realpath `mktemp -d ".ch_depth.XXXXXXXXXXXX"`)"
+cleanup() {
+	rm -rf "${TEMPD}"
+	#trap - TERM && kill -- -$$
+}
+trap cleanup EXIT INT TERM
+
+usage() {
+	cat <<EOF
+Usage: ch_depth [OPTION]... SOURCE...
+print depth map of SOURCE(s) with additional information
+
+Options:
+  -h, --help                   print this message
+  -d, --directory              list directories themselves, not their contents
+      --relative-base=DIR      treat the directory structure up to DIR as
+                                 complete (don't depth DIR or its parents)
+EOF
+	return 0
+}
+
+# Check for required binaries
+while IFS= read -r bin; do
+	if ! command -V "${bin}" >/dev/null 2>&1; then
+		echo "ERROR: Missing required tool in PATH: ${bin}" 1>&2
+		exit 1
+	fi
+done <<EOF
+dirname
+find
+ldd
+readlink
+sed
+stat
+test
+EOF
+
+options="$(getopt -o h,d,f: -l help,directory,relative-base:,trackfile: -- $@)"
+eval set -- "${options}"
+
+DIRECTORY="R"
+REL="/"
+TRACKFILE="${TEMPD}/tracked"
+SOURCES=
+
+while :; do
+	case "$1" in
+		-h|--help)
+			usage && exit 0
+			;;
+		-d|--directory)
+			DIRECTORY="D"
+			shift 1
+			;;
+		--relative-base)
+			REL="$(realpath -s "$2")"
+			shift 2
+			;;
+		-f|--trackfile)
+			TRACKFILE="$2"
+			shift 2
+			;;
+		*)
+			break
+			;;
+	esac
+done
+
+shift 1
+[ "$#" -lt 1 ] && usage && exit 2
+
+touch "${TRACKFILE}"
+
+trackall() {
+	while IFS=':' read -r dir src
+	do
+		trackfile ${dir} ${src}
+	done
+}
+
+trackfile() {
+	dir="$1"
+	src="$2"
+	rsrc="$(realpath -s --relative-base="${REL}" "${src}")"
+
+	#>&2 echo "Real Source: ${src}"
+	#>&2 echo "Adjusted Source: ${rsrc}"
+
+	if ! grep -q "^${src}$" "${TRACKFILE}"
+	then
+		[ ! -z "${DEBUG:-}" ] && >&2 echo "$$: TRACKING: ${src}"
+		echo "${src}" >> "${TRACKFILE}"
+		if [ "${rsrc}" != "/." ] && ! grep -q "^$(dirname "${src}")$" "${TRACKFILE}"
+		then
+			# get tree leading up to this, but without recursion
+			echo "${rsrc}" | sed -n 's:/:\n/:;:l;P;s:\n\(/[^/]*\)/:\1\n/:;tl' | tail -n +2 | sed "/^$/d;s#^#D:${REL}#" | trackall 
+		fi
+		testfile "${dir}" "${src}"
+		[ ! -z "${DEBUG:-}" ] && >&2 echo "$$: TRACKED: ${src}"
+	fi
+
+	return 0
+}
+
+testfile() {
+	dir="$1"
+	src="$2"
+	
+	[ ! -z "${DEBUG:-}" ] && >&2 echo "$$: TESTING: ${src}"
+
+	if test -b "${src}"
+	then
+		>&2 echo "skipping block device ${src}"
+	elif test -c "${src}"
+	then
+		>&2 echo "skipping character device ${src}"
+	elif test -p "${src}"
+	then
+		>&2 echo "skipping named pipe ${src}"
+	elif test -S "${src}"
+	then
+		>&2 echo "skipping socket ${src}"
+	elif test -L "${src}"
+	then
+		target="$(readlink "${src}")"
+		echo "L:${src}:${target}"
+		if [ "${target%${target#?}}" != "/" ]
+		then
+			target="$(realpath "$(dirname "${src}")/${target}")"
+		fi
+		trackfile "${dir}" "${target}"
+	elif test -d "${src}"
+	then
+		echo "D:${src}:$(stat -c'%04a' "${src}")" 
+		if [ "${dir}" = "R" ]
+		then
+			find "${src}" -depth \( -path "${src}" -o -path "${TEMPD}" -o -path "${TEMPD}/*" \) -prune -o -print | sed "s/^/${dir}:/" | trackall
+		fi
+	elif test -e "${src}"
+	then
+		echo "F:${src}:$(stat -c'%04a' "${src}")"
+		2>/dev/null ldd "${src}" | sed 's:^[^/]*\(/[^ ]\+\)\?\s\+.*$:\1:;/^$/d' | sed 's/^/D:/' | trackall
+	else
+		>&2 echo "WARNING: No such file or directory \"${src}\""
+	fi
+
+	[ ! -z "${DEBUG:-}" ] && >&2 echo "$$: TESTED: ${src}"
+
+	return 0
+}
+
+findpath() {
+	for path in $(echo "${PATH}" | tr ':' '\n')
+	do
+		find "${path}" -maxdepth 1 -name "$1" -print -quit | grep . && return 0
+	done
+	echo "$1"
+}
+
+for src in $@
+do
+	if [ -e "$(realpath -s "${src}")" ]
+	then
+		src="$(realpath -s "${src}")"
+	else
+		src="$(findpath "${src}")"
+
+		if [ ! -e "${src}" ]
+		then
+			>&2 echo "WARNING: No such file or directory \"${src}\""
+			continue
+		fi
+	fi
+
+	trackfile "${DIRECTORY}" "${src}"
+done

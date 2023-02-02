@@ -1,0 +1,6 @@
+#!/bin/sh
+
+UID=${2:-995}
+GID=${3:-${2:-995}}
+
+systemd-run --user --scope -p "Delegate=yes" -- lxc-attach -u "${UID}" -g "${GID}" -n "$1" -- /bin/sh && reset

@@ -1,0 +1,28 @@
+[Unit]
+Description=LXC Container: %i
+# This pulls in apparmor, dev-setup, lxc-net
+After=lxc.service
+Wants=lxc.service
+Documentation=man:lxc-start man:lxc
+
+# 10s restart delay * 5 restarts * 2 (for overhead)
+StartLimitIntervalSec=1000
+StartLimitBurst=5
+
+[Service]
+Type=simple
+KillMode=mixed
+TimeoutStopSec=120s
+ExecStart=/usr/bin/lxc-start -F -n %i
+ExecReload=/usr/bin/lxc-stop -r -n %i
+ExecStop=/usr/bin/lxc-stop -n %i
+# Environment=BOOTUP=serial
+# Environment=CONSOLETYPE=serial
+Delegate=yes
+UMask=0022
+
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target

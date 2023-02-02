@@ -1,0 +1,102 @@
+#!/bin/sh
+set -eu
+
+usage() {
+	cat <<EOF
+Usage: mkprofile [OPTION]... FILE SECTION
+make a new profile from the configuration for SECTION in FILE
+
+Options:
+  -h, --help                   print this message
+      --prefix=DIR             use DIR as prefix for profile
+EOF
+	return 0
+}
+
+# Check for required binaries
+while IFS= read -r bin; do
+	if ! command -V "${bin}" >/dev/null 2>&1; then
+		echo "ERROR: Missing required tool: ${bin}" 1>&2
+		exit 1
+	fi
+done <<EOF
+xargs
+iniget
+ch_init
+EOF
+
+options="$(getopt -o h -l help,prefix: -- $@)"
+eval set -- "${options}"
+
+PREFIX=
+
+while :; do
+	case "$1" in
+		-h|--help)
+			usage && exit 0
+			;;
+		--prefix)
+			PREFIX="$(realpath -s "$2")/"
+			shift 2
+			;;
+		*)
+			break
+			;;
+	esac
+done
+
+shift 1
+[ "$#" -ne 2 ] && usage && exit 2
+
+INI="$1"
+[ "${INI%"${INI#?}"}" != "/" ] && INI="${PREFIX}${INI}"
+
+shift 1
+
+SECTION="$1"
+shift 1
+
+INIT_INI="$(iniget "${INI}" "${SECTION}" inifile)"
+[ "${INIT_INI%"${INIT_INI#?}"}" != "/" ] && INIT_INI="${PREFIX}${INIT_INI}"
+
+PROFILE="$(iniget "${INI}" "${SECTION}" path)/${SECTION}"
+[ "${PROFILE%"${PROFILE#?}"}" != "/" ] && PROFILE="${PREFIX}${PROFILE}"
+
+SKEL="$(iniget "${INI}" "${SECTION}" skel)"
+[ "${SKEL%"${SKEL#?}"}" != "/" ] && SKEL="${PREFIX}${SKEL}"
+
+COPY='rsync --mkpath -rlKE'
+
+iniget "${INI}" "${SECTION}" comment
+
+mkdir "${PROFILE}"
+cd "${PROFILE}"
+
+getparam() {
+	iniget "${INI}" "${SECTION}" $1 | tr ',' '\n' | sed 's/^[[:space:]]\+//;s/[[:space:]]\+$//' | sed '/^$/d'
+}
+
+getparam dirs | while read -r dir
+do
+	mkdir -p "${dir}"
+	getparam "${dir}" | while read -r cpy
+	do
+		$COPY "${SKEL}/${cpy}" "${dir}/"
+	done
+done
+
+mkdir -p config
+touch config/config
+echo "lxc.group = ${SECTION}" >> config/config
+
+mkdir -p rootfs
+getparam sections | while IFS= read -r section
+do
+	ch_init "${INIT_INI}" rootfs "${section}"
+done
+
+tar -cvaf config.tar.xz --owner=root --group=root -C config .
+tar -cvaf rootfs.tar.xz --owner=root --group=root -C rootfs .
+tar -cvaf public.tar.xz --owner=root --group=root $(getparam public | tr -s '\n' ' ')
+
+echo "created profile ${SECTION}"

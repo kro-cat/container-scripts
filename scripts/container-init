@@ -1,0 +1,138 @@
+#!/bin/sh
+set -eu
+
+export PATH=$PATH:/usr/sbin:/usr/bin:/sbin:/bin
+
+usage() {
+	cat <<EOF
+Usage: container-init (options) PROFILE NAME
+Create the LXC container NAME using the archives in the PROFILE directory
+
+Options:
+  -h, --help                   print this message
+      --prefix=DIR             use DIR as prefix for PROFILE
+EOF
+	return 0
+}
+
+options=$(getopt -o h -l help,prefix: -- $@)
+eval set -- "$options"
+
+PREFIX=
+
+while :; do
+	case "$1" in
+		-h|--help)
+			usage && exit 0
+			;;
+		--prefix)
+			PREFIX="$(realpath -s "$2")/"
+			shift 2
+			;;
+		*)
+			break
+			;;
+	esac
+done
+
+shift 1
+[ "$#" -ne 2 ] && usage && exit 2
+
+DIR="${PREFIX}$(realpath --relative-to=. "$1")"
+NAME="$2"
+
+ROOTFS_TAR="rootfs.tar.xz"
+CONFIG_TAR="config.tar.xz"
+PUBLIC_TAR="public.tar.xz"
+
+UID="$(id -u "${NAME}")"
+
+if [ -z "${UID}" ]
+then
+	>&2 echo "id for user ${NAME} does not exist!"
+	exit 1
+fi
+
+if [ ! -e "${DIR}" ]
+then
+	>&2 echo "${DIR} does not exist!"
+	exit 1
+fi
+
+if [ ! -e "${DIR}/${ROOTFS_TAR}" ] ; then
+	>&2 echo "Did not find rootfs archive in ${DIR}."
+	exit 1
+fi
+
+if [ ! -e "${DIR}/${CONFIG_TAR}" ] ; then
+	>&2 echo "Did not find config archive in ${DIR}."
+	exit 1
+fi
+
+# Check for required binaries
+while IFS= read -r bin; do
+	if ! command -V "${bin}" >/dev/null 2>&1; then
+		>&2 echo "ERROR: Missing required tool: ${bin}" 1>&2
+		exit 1
+	fi
+done <<EOF
+lxc-ls
+lxc-config
+lxc-create
+lxc-usernsexec
+EOF
+
+if lxc-ls | grep -q "${NAME}"
+then
+	>&2 echo "Container already exists"
+	exit 1
+fi
+
+lxc-create -n "${NAME}" -t local -- -f "${DIR}/${ROOTFS_TAR}" -m "${DIR}/${CONFIG_TAR}" | sed "s#LXC_NAME#$NAME#g"
+
+LXCPATH="$(lxc-config lxc.lxcpath)"
+
+sed -i "s%^#\?\(lxc.idmap = u 995\) UID%\1 ${UID}%" "${LXCPATH}/${NAME}/config"
+sed -i "s%^#\?\(lxc.idmap = g 995\) GID%\1 ${UID}%" "${LXCPATH}/${NAME}/config"
+
+while IFS=' ' read -r dir mode; do
+	lxc-usernsexec -m b:0:100000:65536 -- mkdir -p ${LXCPATH}/${NAME}/${dir}
+	lxc-usernsexec -m b:0:100000:65536 -- chmod ${mode} ${LXCPATH}/${NAME}/${dir}
+done <<EOF
+hook 0755
+EOF
+
+if [ -e "${DIR}/${PUBLIC_TAR}" ] ; then
+	lxc-usernsexec -m b:0:100000:65536 -- tar -xf "${DIR}/${PUBLIC_TAR}" -C "${LXCPATH}/${NAME}"
+fi
+
+#if [ ! -e /srv/homes/$NAME ] ; then
+#	mkdir -vp /srv/homes/$NAME
+#	chown -R webadm:appfs /srv/homes/$NAME
+#fi
+
+#if [ ! -e /etc/nginx/sites-available/$NAME.conf ] ; then
+#	cp /etc/nginx/sites-available/skel /etc/nginx/sites-available/$NAME.conf
+#	sed -i "s#VHOST#$NAME#g" /etc/nginx/sites-available/$NAME.conf
+#fi
+
+cat <<EOF
+
+STOP NOW AND READ THIS BEFORE STARTING THE CONTAINER.
+
+1. Choose and add a static IP to ${LXCPATH}/${NAME}/config.
+
+2. Mirror that selection in /etc/hosts for DNS resolution.
+
+3. Ensure the following directories are present:
+- 0750 root    root    /srv/html/web_arf
+- 0755 lxcroot lxcroot ${LXCPATH}/${NAME}/var
+- 0755 lxcroot lxcroot ${LXCPATH}/${NAME}/hook
+- 0755 ${NAME} ${NAME} /srv/homes/${NAME}/home
+
+4. Add the following line to /etc/fstab and make sure the directory is mounted:
+/srv/homes/${NAME}/home  /srv/html/${NAME}/  fuse.bindfs  ro,noatime,nofail,nosuid,nodev,noexec,force-user=root,force-group=www-data,perms=-w:o=,x-systemd.requires=/srv/homes/  0 0
+
+5. Create a new site template using /etc/sites-available/skel
+
+EOF

@@ -1,0 +1,34 @@
+#!/bin/sh
+
+>&2 echo -n "This isn't gonna work for IPv6!"
+sleep 2
+>&2 echo " You have been warned!"
+sleep 1
+
+LXC_PATH="$(lxc-config lxc.lxcpath)"
+
+lxc-ls -1 | while IFS= read -r name
+do
+	ip="$(grep "^[^#]*[[:space:]]\+${name}[[:space:]]*$" /etc/hosts | awk '{print $1}')"
+	if [ -z "${ip}" ]
+	then
+		>&2 echo "${name} has no IP in /etc/hosts ¯\_(ツ)_/¯"
+	else
+		echo "${name} => ${ip}"
+		# overwrite ip
+		if ! sed -i "s%^#\?\(lxc.net.0.ipv4.address\)[[:space:]]*=.*$%\1 = ${ip}%" "${LXC_PATH}/${name}/config"
+		then
+			echo "lxc.net.0.ipv4.address = ${ip}%" >> "${LXC_PATH}/${name}/config"
+		fi
+
+		# make sure default gateway is uncommented
+		if ! sed -i "s%^#\?\(lxc.net.0.ipv4.gateway[[:space:]]*=.*\)$%\1%" "${LXC_PATH}/${name}/config"
+		then
+			echo "lxc.net.0.ipv4.gateway = auto" >> "${LXC_PATH}/${name}/config"
+		fi
+
+		# make sure to comment out dhclient hooks
+		sed -i "s%^#\?\(.*=.*lxc/hooks/dhclient\)$%#\1%" "${LXC_PATH}/${name}/config"
+	fi
+done
+
